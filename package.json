@@ -1,0 +1,19 @@
+{
+  "name": "ghost-pr",
+  "version": "0.1.0",
+  "description": "GhostPR (AutoFix AI) — Autonomous Visual Bug Reproduction to Passing Git Pull Request",
+  "type": "module",
+  "main": "src/cli.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "cli": "node src/cli.js",
+    "test": "playwright test"
+  },
+  "dependencies": {
+    "@playwright/test": "^1.48.0",
+    "octokit": "^4.0.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}
