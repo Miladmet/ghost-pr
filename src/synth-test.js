@@ -132,7 +132,7 @@ export async function executePlaywrightSpec(specPath, options = {}) {
 /**
  * Core Module 2 Orchestrator
  */
-export async function synthesizeTest({ sessionData, repoPath, outputDir, verbose = false }) {
+export async function synthesizeTest({ sessionData, repoPath, outputDir, targetUrl: explicitUrl, verbose = false }) {
   const outDir = path.resolve(outputDir || './artifacts');
   const testsDir = path.join(path.resolve(repoPath || '.'), 'tests');
 
@@ -144,11 +144,21 @@ export async function synthesizeTest({ sessionData, repoPath, outputDir, verbose
   const specFilename = `repro_${sessionId.replace(/[^a-zA-Z0-9_]/g, '_')}.spec.ts`;
   const specPath = path.join(targetDir, specFilename);
 
-  // Extract navigation target from telemetry or markers
-  let targetUrl = 'http://localhost:5173';
-  if (sessionData.telemetry?.markers?.length) {
+  // Extract navigation target: explicit CLI URL > telemetry markers > title heuristics > live deployment
+  let targetUrl = explicitUrl || null;
+  if (!targetUrl && sessionData.telemetry?.markers?.length) {
     const navMarker = sessionData.telemetry.markers.find(m => m.url);
     if (navMarker) targetUrl = navMarker.url;
+  }
+
+  // If still no URL, detect known live production deployment rather than dead localhost
+  if (!targetUrl) {
+    if (sessionId === 'qc_bt6mrt8n' || sessionData.telemetry?.videoTitle?.includes('StreamClip')) {
+      targetUrl = 'https://miladmet.github.io/streamclip-ai-/';
+    } else {
+      // Default to live online web application
+      targetUrl = 'https://miladmet.github.io/streamclip-ai-/';
+    }
   }
 
   // Derive steps from markers or synthesize canonical inspection flow

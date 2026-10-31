@@ -24,6 +24,7 @@ REQUIRED FLAGS:
   -r, --repo <path>           Path to the target codebase repository
 
 OPTIONS:
+  -u, --url <url>             Target web app URL (default: live deployment e.g. https://miladmet.github.io/streamclip-ai-/)
   -o, --output <dir>          Output directory for generated tests and reports (default: ./artifacts)
   --dry-run                   Run reproduction and patch generation without opening a GitHub PR
   --verbose                   Enable detailed debug output
@@ -42,6 +43,8 @@ export function parseCliArguments(rawArgs = process.argv.slice(2)) {
   const options = {
     session: { type: 'string', short: 's' },
     repo: { type: 'string', short: 'r' },
+    url: { type: 'string', short: 'u' },
+    'target-url': { type: 'string' },
     output: { type: 'string', short: 'o', default: './artifacts' },
     'dry-run': { type: 'boolean', default: false },
     verbose: { type: 'boolean', default: false },
@@ -63,6 +66,7 @@ export async function runGhostPR(rawConfig) {
   // Normalize output directory path upfront to prevent CWD relative path drift
   const config = {
     ...rawConfig,
+    targetUrl: rawConfig.url || rawConfig['target-url'] || null,
     output: path.resolve(rawConfig.output || './artifacts'),
     repo: path.resolve(rawConfig.repo || '.')
   };
@@ -73,6 +77,7 @@ export async function runGhostPR(rawConfig) {
 
   console.log(`📦 Configuration:`);
   console.log(`  • Session Target:  ${config.session}`);
+  console.log(`  • Target Web App:  ${config.targetUrl || '(Auto-resolving from session)'}`);
   console.log(`  • Codebase Repo:   ${config.repo}`);
   console.log(`  • Output Dir:      ${config.output}`);
   console.log(`  • Dry-Run Mode:    ${config['dry-run'] ? 'YES (local verification only)' : 'NO (opens real PR)'}\n`);
@@ -120,6 +125,7 @@ export async function runGhostPR(rawConfig) {
       sessionData: ingestResult,
       repoPath: config.repo,
       outputDir: config.output,
+      targetUrl: config.targetUrl,
       verbose: config.verbose
     });
     pipelineState.specPath = testResult.specPath;

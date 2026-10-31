@@ -4,7 +4,7 @@ import { test, expect } from '@playwright/test';
  * Autonomous Reproduction Spec synthesized by GhostPR (AutoFix AI)
  * Session ID: qc_bt6mrt8n
  * Title: QuickCast Tab Recording
- * Target: http://localhost:5173
+ * Target: https://miladmet.github.io/streamclip-ai-/
  */
 
 test.describe('GhostPR Automated Bug Reproduction — qc_bt6mrt8n', () => {
@@ -15,11 +15,11 @@ test.describe('GhostPR Automated Bug Reproduction — qc_bt6mrt8n', () => {
     page.on('pageerror', err => pageErrors.push(err.message));
 
     // Navigation to recorded target entrypoint
-    await page.goto('http://localhost:5173', { waitUntil: 'domcontentloaded' });
+    await page.goto('https://miladmet.github.io/streamclip-ai-/', { waitUntil: 'domcontentloaded' });
 
     // Default session reproduction sequence
     await test.step('Verify initial target page load & layout', async () => {
-      await expect(page).toHaveURL(/http:\/\/localhost:5173/);
+      await expect(page).toHaveURL(/https:\/\/miladmet\.github\.io\/streamclip\-ai\-\//);
       await expect(page.locator('body')).toBeVisible();
     });
 
