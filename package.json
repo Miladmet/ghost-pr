@@ -5,7 +5,7 @@
   "type": "module",
   "main": "src/cli.js",
   "scripts": {
-    "start": "node src/server.js",
+    "start": "node src/cli.js",
     "cli": "node src/cli.js",
     "test": "playwright test"
   },

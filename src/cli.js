@@ -59,15 +59,22 @@ export function parseCliArguments(rawArgs = process.argv.slice(2)) {
   }
 }
 
-export async function runGhostPR(config) {
+export async function runGhostPR(rawConfig) {
+  // Normalize output directory path upfront to prevent CWD relative path drift
+  const config = {
+    ...rawConfig,
+    output: path.resolve(rawConfig.output || './artifacts'),
+    repo: path.resolve(rawConfig.repo || '.')
+  };
+
   console.log(`\n======================================================`);
   console.log(` 👻 GhostPR (AutoFix AI) — Autonomous Bug-to-PR Engine `);
   console.log(`======================================================\n`);
 
   console.log(`📦 Configuration:`);
   console.log(`  • Session Target:  ${config.session}`);
-  console.log(`  • Codebase Repo:   ${path.resolve(config.repo)}`);
-  console.log(`  • Output Dir:      ${path.resolve(config.output)}`);
+  console.log(`  • Codebase Repo:   ${config.repo}`);
+  console.log(`  • Output Dir:      ${config.output}`);
   console.log(`  • Dry-Run Mode:    ${config['dry-run'] ? 'YES (local verification only)' : 'NO (opens real PR)'}\n`);
 
   // Ensure output directory exists

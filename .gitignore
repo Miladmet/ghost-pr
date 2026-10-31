@@ -3,4 +3,4 @@ dist/
 build/
 .env
 .env.*
-artifacts/*.webm
+artifacts/

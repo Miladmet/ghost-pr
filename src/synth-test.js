@@ -33,8 +33,6 @@ export function generatePlaywrightSpecCode({ sessionId, targetUrl, steps = [], v
     });
 
     await test.step('Inspect critical UI components and detect unhandled errors', async () => {
-      const pageErrors = [];
-      page.on('pageerror', err => pageErrors.push(err.message));
       await page.waitForTimeout(1000);
       expect(pageErrors.length, 'No uncaught runtime exceptions should be thrown').toBe(0);
     });`;
@@ -51,6 +49,10 @@ export function generatePlaywrightSpecCode({ sessionId, targetUrl, steps = [], v
 test.describe('GhostPR Automated Bug Reproduction — ${sessionId}', () => {
 
   test('Autonomous E2E reproduction and state verification', async ({ page }) => {
+    // Hoist error trap BEFORE navigation to capture boot & hydration exceptions
+    const pageErrors = [];
+    page.on('pageerror', err => pageErrors.push(err.message));
+
     // Navigation to recorded target entrypoint
     await page.goto('${targetUrl || 'http://localhost:5173'}', { waitUntil: 'domcontentloaded' });
 ${stepBlocks}
@@ -171,13 +173,18 @@ export async function synthesizeTest({ sessionData, repoPath, outputDir, verbose
     throw new Error(`Failed to write Playwright spec to ${specPath}`);
   }
 
+  // Execute synthesized spec to confirm failure (bug reproduction)
+  if (verbose) console.log(`    [synth-test] Executing spec via Playwright to verify bug reproduction...`);
+  const execResult = await executePlaywrightSpec(specPath, { verbose });
+
   return {
     sessionId,
     specPath,
     specFilename,
     targetUrl,
     stepCount: steps.length,
-    failureConfirmed: true, // Marker indicates test was synthesized to catch the issue
+    failureConfirmed: !execResult.passed, // true = test failed = bug confirmed reproduced
+    execResult,
     synthesizedAt: new Date().toISOString()
   };
 }
