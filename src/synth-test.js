@@ -17,6 +17,14 @@ const execFileAsync = promisify(execFile);
 // Marker emitted by generatePlaywrightSpecCode when it has no interaction steps to work from.
 const DEFAULT_SEQUENCE_MARKER = '// Default session reproduction sequence';
 const GHOSTPR_TESTS_DIR = fileURLToPath(new URL('../tests/', import.meta.url));
+const GHOSTPR_ROOT = fileURLToPath(new URL('../', import.meta.url));
+// Gitignored scratch dir inside GhostPR where out-of-tree specs are executed (no Playwright config here)
+export const GHOSTPR_RUN_DIR = path.join(GHOSTPR_ROOT, 'artifacts', '.runs');
+
+function isInside(root, target) {
+  const rel = path.relative(path.resolve(root), path.resolve(target));
+  return Boolean(rel) && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
 
 /**
  * Returns true when a spec on disk is a refined reproduction worth keeping:
@@ -178,6 +186,23 @@ function summarizeReport(report) {
  * marked `infraError: true` so callers do not mistake it for a reproduced bug.
  */
 export async function executePlaywrightSpec(specPath, options = {}) {
+  // Playwright and the spec's `@playwright/test` import resolve from node_modules above the run
+  // directory. Specs outside GhostPR (custom --output, target repo tests/) run from a copy in
+  // GhostPR's own run dir; this also keeps a target repo's Playwright config from interfering.
+  const relocated = !isInside(GHOSTPR_ROOT, specPath);
+  const runPath = relocated ? path.join(GHOSTPR_RUN_DIR, path.basename(specPath)) : path.resolve(specPath);
+  if (relocated) {
+    fs.mkdirSync(GHOSTPR_RUN_DIR, { recursive: true });
+    fs.copyFileSync(specPath, runPath);
+  }
+  try {
+    return await runPlaywright(runPath, options);
+  } finally {
+    if (relocated) fs.rmSync(runPath, { force: true });
+  }
+}
+
+async function runPlaywright(specPath, options) {
   const specDir = path.dirname(specPath);
   const isWindows = process.platform === 'win32';
   // Node >= 18.20.2 / 20.12.2 refuses to spawn .cmd/.bat files without a shell (CVE-2024-27980).

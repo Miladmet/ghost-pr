@@ -7,8 +7,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 
 const execFileAsync = promisify(execFile);
+const DOWNLOAD_TIMEOUT_MS = 5 * 60 * 1000;
 
 export function parseSessionId(input) {
   if (!input) throw new Error("No session input provided.");
@@ -29,14 +32,48 @@ export async function downloadVideoStream(sessionId, outputDir) {
     return { videoPath, sizeBytes: fs.statSync(videoPath).size };
   }
 
-  // Fetch using standard curl binary (safe & native)
-  await execFileAsync('curl.exe', ['-s', '-L', '-o', videoPath, videoUrl]);
-
-  if (!fs.existsSync(videoPath) || fs.statSync(videoPath).size === 0) {
-    throw new Error(`Failed to download video stream from ${videoUrl}`);
+  // Native fetch (Node 18+) works the same on Windows, macOS and Linux; no curl binary needed.
+  // Stream to a .part file and rename on success so an interrupted download is never reused.
+  const partPath = `${videoPath}.part`;
+  try {
+    const res = await fetch(videoUrl, { redirect: 'follow', signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
+    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status} ${res.statusText}`.trim());
+    await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(partPath));
+    if (fs.statSync(partPath).size === 0) throw new Error('empty response body');
+    fs.renameSync(partPath, videoPath);
+  } catch (err) {
+    fs.rmSync(partPath, { force: true });
+    throw new Error(`Failed to download video stream from ${videoUrl}: ${err.message}`);
   }
 
   return { videoPath, sizeBytes: fs.statSync(videoPath).size };
+}
+
+// Python launchers to try, in order: macOS/Linux usually only ship `python3`; Windows often only `python`.
+const PYTHON_CANDIDATES = ['python3', 'python'];
+
+// Reads ffmpeg from imageio-ffmpeg and grabs one frame. Paths arrive via argv, never interpolated into code.
+const FRAME_GRAB_SCRIPT = [
+  'import subprocess, sys, imageio_ffmpeg',
+  'exe = imageio_ffmpeg.get_ffmpeg_exe()',
+  "r = subprocess.run([exe, '-y', '-ss', sys.argv[1], '-i', sys.argv[2], '-vframes', '1', sys.argv[3]], capture_output=True)",
+  'sys.exit(r.returncode)'
+].join('\n');
+
+let cachedPython;
+
+/** Returns the first Python launcher that can import imageio_ffmpeg, or null. Probed once per process. */
+export async function findPython() {
+  if (cachedPython !== undefined) return cachedPython;
+  cachedPython = null;
+  for (const candidate of PYTHON_CANDIDATES) {
+    try {
+      await execFileAsync(candidate, ['-c', 'import imageio_ffmpeg'], { timeout: 20000 });
+      cachedPython = candidate;
+      break;
+    } catch {}
+  }
+  return cachedPython;
 }
 
 export async function extractKeyframes(videoPath, outputDir, timestamps = [1, 5, 10, 20]) {
@@ -44,16 +81,18 @@ export async function extractKeyframes(videoPath, outputDir, timestamps = [1, 5,
   if (!fs.existsSync(keyframesDir)) fs.mkdirSync(keyframesDir, { recursive: true });
 
   const frames = [];
-  // Probe python imageio-ffmpeg executable
+  const python = await findPython();
+  if (!python) {
+    console.warn('    [ingest] Keyframes skipped: no python3/python with imageio-ffmpeg found (pip install imageio-ffmpeg)');
+    return frames;
+  }
+
   for (const sec of timestamps) {
     const frameName = `frame_${sec.toString().padStart(2, '0')}s.png`;
     const framePath = path.join(keyframesDir, frameName);
     
     try {
-      await execFileAsync('python', [
-        '-c',
-        `import subprocess, imageio_ffmpeg; exe=imageio_ffmpeg.get_ffmpeg_exe(); subprocess.run([exe, '-y', '-ss', '${sec}', '-i', r'${videoPath}', '-vframes', '1', r'${framePath}'], capture_output=True)`
-      ]);
+      await execFileAsync(python, ['-c', FRAME_GRAB_SCRIPT, String(sec), videoPath, framePath], { timeout: 60000 });
       if (fs.existsSync(framePath) && fs.statSync(framePath).size > 0) {
         frames.push(framePath);
       }
@@ -69,7 +108,9 @@ export async function fetchSessionTelemetry(sessionId) {
   const watchUrl = `https://quickcast-r2-uploader.admettre.workers.dev/watch/${sessionId}`;
   
   try {
-    const { stdout } = await execFileAsync('curl.exe', ['-s', '-L', watchUrl]);
+    const res = await fetch(watchUrl, { redirect: 'follow', signal: AbortSignal.timeout(30000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`.trim());
+    const stdout = await res.text();
     
     // Parse metadata from Watch page HTML
     const titleMatch = stdout.match(/<title>(.*?)<\/title>/i);
