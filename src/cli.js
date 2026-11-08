@@ -191,6 +191,13 @@ export async function runGhostPR(rawConfig) {
         patchDiff: pipelineState.patchDiff,
         specPath: pipelineState.specPath,
         telemetry: pipelineState.telemetry,
+        verification: {
+          bugReproduced: pipelineState.redResult?.infraError ? null : pipelineState.bugReproduced,
+          testPassedAfter: pipelineState.greenResult?.infraError ? null : pipelineState.testPassedAfter,
+          patchSource: pipelineState.patchSource,
+          redRanAgainst: pipelineState.redResult?.ranAgainst
+        },
+        outputDir: config.output,
         verbose: config.verbose
       });
       pipelineState.prUrl = prResult.prUrl;

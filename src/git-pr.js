@@ -13,10 +13,42 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 
+/** Markdown checkbox: ticked only for a confirmed `true`; anything else stays unticked. */
+const box = value => (value === true ? '[x]' : '[ ]');
+
+/**
+ * Status line and checklist derived from what the pipeline actually observed.
+ * `verification`: { bugReproduced, testPassedAfter, patchSource, redRanAgainst, specIncluded }
+ * Local filesystem paths are deliberately left out, since PR bodies are often public.
+ */
+export function buildVerificationSection({ verification = {}, patchDiff, specRepoPath }) {
+  const { bugReproduced, testPassedAfter, patchSource, redRanAgainst, specIncluded } = verification;
+  const hasPatch = Boolean(patchDiff && patchDiff.trim());
+  const note = v => (v === undefined || v === null ? ' _(not run)_' : '');
+
+  let status;
+  if (bugReproduced === true && testPassedAfter === true) status = '✅ **Reproduced on the unpatched build, verified passing on the patched build**';
+  else if (bugReproduced === true) status = '❌ **Reproduced, but the patch did not pass verification**';
+  else if (bugReproduced === false && testPassedAfter === true) status = '⚠️ **Not reproduced on the unpatched build** (spec passes before and after the patch)';
+  else status = '⚠️ **Verification incomplete**';
+
+  const checklist = [
+    `- ${box(bugReproduced)} Bug reproduced: the spec failed on the unpatched build${redRanAgainst ? ` (\`${redRanAgainst}\`)` : ''}.${note(bugReproduced)}`,
+    `- ${box(hasPatch)} Patch captured${patchSource ? ` from \`${patchSource}\`` : ''}.`,
+    `- ${box(testPassedAfter)} Reproduction spec passes against a local build of the patched branch.${note(testPassedAfter)}`,
+    `- ${box(specIncluded)} Reproduction spec included in this PR${specRepoPath ? ` at \`${specRepoPath}\`` : ''}.`
+  ].join('\n');
+
+  return { status, checklist };
+}
+
 /**
  * Builds a structured, high-impact Pull Request markdown body.
  */
-export function buildPullRequestBody({ sessionId, telemetry, patchDiff, specPath }) {
+export function buildPullRequestBody({ sessionId, telemetry, patchDiff, specPath, specRepoPath, verification = {} }) {
+  // Path of the spec inside the target repo (posix separators), used in the test command
+  specRepoPath = specRepoPath || `tests/${path.basename(specPath || 'repro.spec.ts')}`;
+  const { status, checklist } = buildVerificationSection({ verification, patchDiff, specRepoPath });
   const watchUrl = telemetry?.watchUrl || `https://quickcast-r2-uploader.admettre.workers.dev/watch/${sessionId}`;
   const videoTitle = telemetry?.videoTitle || 'QuickCast Session';
   const markers = telemetry?.markers || [];
@@ -28,7 +60,7 @@ export function buildPullRequestBody({ sessionId, telemetry, patchDiff, specPath
   return `## 👻 GhostPR (AutoFix AI) — Autonomous Bug Resolution
 > **Automated Pull Request generated from user recording session:** [\`${sessionId}\`](${watchUrl})  
 > **Session Title:** ${videoTitle}  
-> **Resolution Status:** ✅ **Reproduced & Verified Passing via Playwright**
+> **Resolution Status:** ${status}
 
 ---
 
@@ -45,29 +77,64 @@ ${markersTable}
 
 ### 2. 🧪 Automated Playwright Reproduction Suite
 GhostPR synthesized an E2E reproduction test to lock in regression protection:
-* **Spec File:** \`${path.basename(specPath || 'repro.spec.ts')}\`
+* **Spec File:** \`${specRepoPath}\`
 * **Local Test Command:**
 \`\`\`bash
-npx playwright test ${path.basename(specPath || 'repro.spec.ts')} --project=chromium
+npx playwright test ${specRepoPath}
 \`\`\`
 
 ---
 
 ### 3. 🔍 Applied Codebase Fix (Diff)
 \`\`\`diff
-${patchDiff || '# Autonomous patch applied cleanly.'}
+${patchDiff || '# No patch was captured.'}
 \`\`\`
 
 ---
 
 ### 4. 🤖 Verification Checklist
-- [x] Bug reproduced on original unpatched codebase.
-- [x] Defensive patch applied to prevent unhandled runtime failure.
-- [x] Playwright regression suite passes (100% green).
-- [x] Zero cloud compute or GPU overhead incurred ($0.00/month).
+${checklist}
+
+_All verification ran locally (Playwright and a local static server); no cloud GPU was used._
 
 *Dispatched autonomously by GhostPR for Kiroween Hackathon 2026.*
 `;
+}
+
+/**
+ * Works out where the reproduction spec should live inside the target repo.
+ * A spec already inside the repo is used in place; one outside it (e.g. in GhostPR's
+ * own tests/ folder) is copied to `<repo>/tests/<file>` so the PR carries the regression test.
+ * Returns null when there is no spec on disk.
+ */
+export function resolveSpecDestination(repoRoot, specPath) {
+  if (!specPath || !fs.existsSync(specPath)) return null;
+  const root = path.resolve(repoRoot);
+  const source = path.resolve(specPath);
+  const rel = path.relative(root, source);
+  const insideRepo = rel && !rel.startsWith('..') && !path.isAbsolute(rel);
+  const destPath = insideRepo ? source : path.join(root, 'tests', path.basename(source));
+  return {
+    destPath,
+    repoRelPath: path.relative(root, destPath).split(path.sep).join('/'),
+    needsCopy: !insideRepo
+  };
+}
+
+/**
+ * Lists the repo-relative files touched by a unified diff (both sides, so deletions and
+ * renames are covered). Paths that would escape the repo root are dropped.
+ */
+export function filesInDiff(diffText, repoRoot) {
+  const root = path.resolve(repoRoot);
+  const files = new Set();
+  for (const line of String(diffText ?? '').split(/\r?\n/)) {
+    const m = line.match(/^(?:\+\+\+ b|--- a)\/(.+?)\s*$/);
+    if (!m || m[1] === 'dev/null') continue;
+    const abs = path.resolve(root, m[1]);
+    if (abs.startsWith(root + path.sep)) files.add(path.relative(root, abs).split(path.sep).join('/'));
+  }
+  return [...files];
 }
 
 /**
@@ -81,21 +148,27 @@ async function gitCmd(repoPath, args) {
  * Core Module 4 Orchestrator:
  * Creates branch -> commits spec + fix -> dispatches PR via GitHub Octokit (or prints ready PR).
  */
-export async function createPullRequest({ repoPath, sessionId, patchDiff, specPath, telemetry, verbose = false }) {
+export async function createPullRequest({ repoPath, sessionId, patchDiff, specPath, telemetry, verification = {}, outputDir, verbose = false }) {
   const root = path.resolve(repoPath || '.');
   const safeId = sessionId.replace(/[^a-zA-Z0-9_]/g, '_');
   const branchName = `fix/ghost-pr-${safeId}`;
   const commitMessage = `fix(autofix): resolve defect from QuickCast session ${sessionId}`;
 
+  const specTarget = resolveSpecDestination(root, specPath);
+
   const prBody = buildPullRequestBody({
     sessionId,
     telemetry,
     patchDiff,
-    specPath
+    specPath,
+    specRepoPath: specTarget?.repoRelPath,
+    verification: { ...verification, specIncluded: Boolean(specTarget) }
   });
 
-  // Save the PR description to an artifact file
-  const prBodyPath = path.join(root, `PR_DESCRIPTION_${safeId}.md`);
+  // Save the PR description with GhostPR's artifacts, outside the target repo, so it is never committed
+  const artifactsDir = path.resolve(outputDir || './artifacts');
+  fs.mkdirSync(artifactsDir, { recursive: true });
+  const prBodyPath = path.join(artifactsDir, `PR_DESCRIPTION_${safeId}.md`);
   fs.writeFileSync(prBodyPath, prBody, 'utf-8');
 
   let branchCreated = false;
@@ -114,11 +187,25 @@ export async function createPullRequest({ repoPath, sessionId, patchDiff, specPa
       await gitCmd(root, ['checkout', branchName]);
     }
 
-    // Add modified files and test spec
-    if (specPath && fs.existsSync(specPath)) {
-      await gitCmd(root, ['add', specPath]);
+    // Write the reproduction spec into the target repo (on the fix branch) and stage it
+    if (specTarget) {
+      if (specTarget.needsCopy) {
+        fs.mkdirSync(path.dirname(specTarget.destPath), { recursive: true });
+        fs.copyFileSync(path.resolve(specPath), specTarget.destPath);
+        if (verbose) console.log(`    [git-pr] Copied reproduction spec into target repo: ${specTarget.repoRelPath}`);
+      }
+      await gitCmd(root, ['add', '--', specTarget.repoRelPath]);
     }
-    await gitCmd(root, ['add', '-A']);
+
+    // Stage only the files named in the patch; never `git add -A`, which would sweep in
+    // unrelated untracked files. -A here is scoped to the listed paths so deletions are staged.
+    const patchFiles = filesInDiff(patchDiff, root);
+    if (patchFiles.length) {
+      await gitCmd(root, ['add', '-A', '--', ...patchFiles]);
+      if (verbose) console.log(`    [git-pr] Staged patched files: ${patchFiles.join(', ')}`);
+    } else if (verbose) {
+      console.log(`    [git-pr] No patched files found in the diff; staging the spec only`);
+    }
 
     try {
       await gitCmd(root, ['commit', '-m', commitMessage]);
