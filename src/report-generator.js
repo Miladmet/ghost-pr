@@ -13,6 +13,7 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 const MAX_LOG_CHARS = 8000;
@@ -25,6 +26,34 @@ export function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+const escapeRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * Replaces local filesystem roots with neutral labels so a report can be shared publicly,
+ * e.g. `C:\Users\me\work\ghost-pr\tests\a.spec.ts` -> `[workspace]/tests/a.spec.ts`.
+ * Matches `\`, `/` and JSON-escaped `\\` spellings; case-insensitive (Windows paths).
+ * Rules are applied longest-path first so nested roots get the most specific label.
+ */
+export function redactPaths(text, rules = []) {
+  let out = String(text ?? '');
+  const sorted = rules
+    .filter(r => r && r.path && r.label)
+    // Not path.resolve(): it would rewrite POSIX roots as C:\... when run on Windows
+    .map(r => ({ root: String(r.path).replace(/[\\/]+$/, ''), label: r.label }))
+    .sort((a, b) => b.root.length - a.root.length);
+
+  for (const { root, label } of sorted) {
+    const parts = root.split(/[\\/]+/).filter(Boolean).map(escapeRe);
+    const lead = /^[\\/]/.test(root) ? '[\\\\/]' : '';
+    const rootRe = new RegExp(`${lead}${parts.join('(?:\\\\\\\\|[\\\\/])')}(?![A-Za-z0-9_-])`, 'gi');
+    out = out.replace(rootRe, label);
+    // Normalize the separators of whatever path continues after the label
+    const tailRe = new RegExp(`${escapeRe(label)}((?:(?:\\\\\\\\|[\\\\/])[^\\s\\\\/<>"'\`:*?|]+)+)`, 'g');
+    out = out.replace(tailRe, (_, tail) => label + tail.replace(/\\\\|\\/g, '/'));
+  }
+  return out;
 }
 
 /** Removes ANSI colour escape sequences emitted by Playwright reporters. */
@@ -260,7 +289,7 @@ footer{max-width:1100px;margin:0 auto;padding:6px 20px 40px;color:var(--muted);f
 <body>
 <header>
   <h1>👻 GhostPR Reproduction Report</h1>
-  <p class="sub">Autonomous bug-to-PR pipeline · QuickCast → Playwright → Git</p>
+  <p class="sub">Spec-driven bug reproduction &amp; closed-loop Playwright verification · QuickCast → Playwright → Git</p>
   <div class="badges">${badges}</div>
   <dl class="meta">
     <div><dt>QuickCast session</dt><dd>${escapeHtml(sessionId)}</dd></div>
@@ -332,15 +361,19 @@ footer{max-width:1100px;margin:0 auto;padding:6px 20px 40px;color:var(--muted);f
  * @param {object} pipelineData  sessionId, targetUrl, telemetry, keyframes, patchDiff,
  *                               targetFile, targetLine, redResult, greenResult,
  *                               bugReproduced, testPassedAfter, prUrl
- * @param {object} [options]     outputDir (default ./artifacts), dryRun, embedImages, generatedAt
+ * @param {object} [options]     outputDir (default ./artifacts), dryRun, embedImages, generatedAt,
+ *                               redactPaths: [{ path, label }] roots to hide (home dir is always hidden),
+ *                               fileName (default report.html)
  * @returns {{ reportPath: string, sizeBytes: number }}
  */
 export function generateHtmlReport(pipelineData, options = {}) {
   const outputDir = path.resolve(options.outputDir || './artifacts');
   fs.mkdirSync(outputDir, { recursive: true });
 
-  const html = renderReportHtml(pipelineData, options);
-  const reportPath = path.join(outputDir, 'report.html');
+  // Privacy by default: the user's home directory is always redacted, plus any caller-supplied roots
+  const rules = [...(options.redactPaths || []), { path: os.homedir(), label: '~' }];
+  const html = redactPaths(renderReportHtml(pipelineData, options), rules);
+  const reportPath = path.join(outputDir, options.fileName || 'report.html');
   fs.writeFileSync(reportPath, html, 'utf-8');
 
   const sizeBytes = fs.statSync(reportPath).size;
