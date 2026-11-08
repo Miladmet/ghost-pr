@@ -43,13 +43,13 @@ GhostPR's built-in patch generator is a simple null-check rewriter. Autonomous p
 
 ## 🧪 Case Study: `qc_bt6mrt8n` (StreamClip AI)
 
-[![GhostPR report for qc_bt6mrt8n: Red failure on production, Green pass on the patched build, and the applied patch](docs/report-screenshot.png)](docs/report-screenshot.png)
+[![GhostPR report for qc_bt6mrt8n: Red failure on production, Green pass on the patched build, and the applied patch](docs/report-screenshot.png)](https://miladmet.github.io/ghost-pr/)
 
 - **Bug:** clicking *Simulate Chat Hype Spike* before any capture showed "Auto-clipping last 30s…" and overwrote the clip attribution, but no clip was made. It also started the 8-second cooldown.
 - **Red:** fails on production at step *"Hype spike before capture must not claim an auto-clip"*.
 - **Fix:** an 11-line defensive guard in `recordChatHype()`, on branch [`fix/ghost-pr-qc_bt6mrt8n`](https://github.com/Miladmet/streamclip-ai-/tree/fix/ghost-pr-qc_bt6mrt8n).
 - **Green:** all 8 steps pass on a local build of the fix branch (3/3 repeats), including a check that auto-clip still works after capture.
-- **Interactive report:** [`docs/sample-report.html`](docs/sample-report.html). GitHub shows HTML files as source, so download it and open it in a browser. It's self-contained and makes no network requests.
+- **Interactive report:** [**🌐 View Live Interactive Report**](https://miladmet.github.io/ghost-pr/) (hosted on GitHub Pages) or inspect [`docs/sample-report.html`](docs/sample-report.html). It is self-contained and makes zero external network requests.
 
 The sample report is built from a real run by `npm run sample-report`. Keyframes are cropped to the app viewport (no OS taskbar, browser tabs or bookmarks), and local paths are redacted as `[workspace]` and `[target-repo]`.
 
