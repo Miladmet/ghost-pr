@@ -64,7 +64,7 @@ ${markers.map((m, i) => `| ${i + 1} | \`${m.timeSec || '00:00'}\` | ${m.action |
       ? '*No interaction markers were captured in this session; the existing refined reproduction spec was used.*'
       : '*No interaction markers were captured in this session; baseline visual inspection sequence applied.*';
 
-  return `## 👻 GhostPR (AutoFix AI) — Autonomous Bug Resolution
+  return `## 👻 GhostPR — Verified Bug Reproduction & Fix
 > **Automated Pull Request generated from user recording session:** [\`${sessionId}\`](${watchUrl})  
 > **Session Title:** ${videoTitle}  
 > **Resolution Status:** ${status}
@@ -100,7 +100,7 @@ ${checklist}
 
 _All verification ran locally (Playwright and a local static server); no cloud GPU was used._
 
-*Dispatched autonomously by GhostPR for Kiroween Hackathon 2026.*
+*Reproduced and verified by GhostPR · Kiroween 2026 Hackathon — Frankenstein Category.*
 `;
 }
 
@@ -244,7 +244,7 @@ export async function createPullRequest({ repoPath, sessionId, patchDiff, specPa
         const response = await octokit.rest.pulls.create({
           owner,
           repo,
-          title: `👻 GhostPR: Autonomous fix for ${sessionId}`,
+          title: `👻 GhostPR: Red ➔ Green verified fix for ${sessionId}`,
           head: branchName,
           base: 'main',
           body: prBody

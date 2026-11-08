@@ -11,10 +11,14 @@
 import { parseArgs } from 'node:util';
 import path from 'node:path';
 import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+// GhostPR's own repo root (parent of src/), used to redact local paths in reports
+const GHOSTPR_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
 const HELP_TEXT = `
-👻 GhostPR (AutoFix AI) — Autonomous Visual Bug Reproduction to Passing Git PR
-Built for Kiroween Hackathon 2026
+👻 GhostPR — Spec-driven autonomous bug reproduction and closed-loop Playwright verification
+Kiroween 2026 Hackathon — Frankenstein Category
 
 USAGE:
   node src/cli.js --session <url_or_id> --repo <path> [options]
@@ -32,10 +36,10 @@ OPTIONS:
   -v, --version               Show GhostPR version
 
 EXAMPLES:
-  # Full autonomous pipeline (Ingest -> Reproduce -> Fix -> PR)
+  # Full pipeline (Ingest -> Reproduce -> Verify -> PR, PR only if Green)
   node src/cli.js -s "https://quickcast-r2-uploader.admettre.workers.dev/watch/qc_bt6mrt8n" -r "../my-app"
 
-  # Dry run (Reproduce bug and generate patch locally)
+  # Dry run (Reproduce Red, verify Green locally; never push)
   node src/cli.js -s qc_bt6mrt8n -r "../my-app" --dry-run
 `;
 
@@ -72,7 +76,7 @@ export async function runGhostPR(rawConfig) {
   };
 
   console.log(`\n======================================================`);
-  console.log(` 👻 GhostPR (AutoFix AI) — Autonomous Bug-to-PR Engine `);
+  console.log(` 👻 GhostPR — Spec-Driven Bug Reproduction & Closed-Loop Verification `);
   console.log(`======================================================\n`);
 
   console.log(`📦 Configuration:`);
@@ -147,7 +151,7 @@ export async function runGhostPR(rawConfig) {
     console.log(`  ✓ Initial test execution confirms bug reproduction: ${testResult.failureConfirmed ? 'BUG REPRODUCED (Failing as expected)' : testResult.execResult?.infraError ? `Warning: Playwright could not run the spec (${testResult.execResult.error})` : 'Warning: Test passed initially (bug not reproduced)'}`);
 
     // -------------------------------------------------------------
-    // STAGE 3: Autonomous Code Diagnosis & Patching
+    // STAGE 3: Code Diagnosis, Patch Capture & Closed-Loop Verification
     // -------------------------------------------------------------
     console.log(`\n[Stage 3/4] 🔍 Diagnosing codebase & generating self-healing patch...`);
     const { fixCodebase } = await import('./code-fixer.js');
@@ -206,12 +210,32 @@ export async function runGhostPR(rawConfig) {
       console.log(`  🎉 Pull Request successfully opened: ${pipelineState.prUrl}`);
     }
 
+    // Persist the run (minus bulky raw Playwright JSON) so docs can be rebuilt without re-running.
+    // Stays in the gitignored output dir: it contains unredacted local paths.
+    try {
+      const slim = r => (r ? { passed: r.passed, infraError: r.infraError, output: r.output, error: r.error, ranAgainst: r.ranAgainst } : null);
+      fs.writeFileSync(path.join(config.output, 'pipeline-state.json'), JSON.stringify({
+        ...pipelineState,
+        redResult: slim(pipelineState.redResult),
+        greenResult: slim(pipelineState.greenResult),
+        dryRun: Boolean(config['dry-run']),
+        roots: { workspace: GHOSTPR_ROOT, targetRepo: config.repo },
+        savedAt: new Date().toISOString()
+      }, null, 2));
+    } catch (stateErr) {
+      console.warn(`  ⚠ Could not save pipeline state: ${stateErr.message}`);
+    }
+
     // REQ-7: standalone visual HTML report (non-fatal: a report problem must not discard a finished fix)
     try {
       const { generateHtmlReport } = await import('./report-generator.js');
       const { reportPath } = generateHtmlReport(pipelineState, {
         outputDir: config.output,
-        dryRun: Boolean(config['dry-run'])
+        dryRun: Boolean(config['dry-run']),
+        redactPaths: [
+          { path: GHOSTPR_ROOT, label: '[workspace]' },
+          { path: config.repo, label: '[target-repo]' }
+        ]
       });
       pipelineState.reportPath = reportPath;
       const shown = path.relative(process.cwd(), reportPath).split(path.sep).join('/');
@@ -228,7 +252,7 @@ export async function runGhostPR(rawConfig) {
     } else if (!pipelineState.bugReproduced) {
       banner = '✓ GhostPR: Baseline Maintained (No regression reproduced)';
     } else if (pipelineState.testPassedAfter) {
-      banner = '✅ GhostPR: Autonomous Red ➔ Green Self-Healing Verified!';
+      banner = '✅ GhostPR: Red ➔ Green Verified (fails on baseline, passes on patched build)';
     } else {
       banner = '❌ GhostPR: Regression reproduced, but the patch did not pass verification';
       process.exitCode = 1;

@@ -2,7 +2,7 @@
 # Category: Frankenstein (Browser Video + Playwright + Kiro Agent + Git PR)
 
 ## System Identity & Objective
-GhostPR is an autonomous engineering agent designed to turn user screen recordings (via QuickCast) directly into reproducible Playwright E2E tests and passing Git Pull Requests with zero human intervention.
+GhostPR is a spec-driven engineering agent that turns user screen recordings (via QuickCast) into reproducible Playwright E2E tests, and verifies candidate fixes in a closed Red ➔ Green loop before any Pull Request is opened.
 
 ## Architectural Directives
 1. **Zero Cloud GPU / Zero Compute Waste:**
