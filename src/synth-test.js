@@ -10,8 +10,44 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 
 const execFileAsync = promisify(execFile);
+
+// Marker emitted by generatePlaywrightSpecCode when it has no interaction steps to work from.
+const DEFAULT_SEQUENCE_MARKER = '// Default session reproduction sequence';
+const GHOSTPR_TESTS_DIR = fileURLToPath(new URL('../tests/', import.meta.url));
+
+/**
+ * Returns true when a spec on disk is a refined reproduction worth keeping:
+ * it has at least one test.step() and is not the shallow default fallback.
+ */
+export function isRefinedSpec(content) {
+  return /test\.step\(/.test(content) && !content.includes(DEFAULT_SEQUENCE_MARKER);
+}
+
+/**
+ * Looks for an existing refined spec for this session, in priority order:
+ * the target repo's tests/ folder, then GhostPR's own tests/ folder.
+ */
+export function findRefinedSpec(specFilename, repoPath) {
+  const candidates = [
+    path.join(path.resolve(repoPath || '.'), 'tests', specFilename),
+    path.join(GHOSTPR_TESTS_DIR, specFilename)
+  ];
+  for (const candidate of [...new Set(candidates)]) {
+    try {
+      if (fs.existsSync(candidate) && isRefinedSpec(fs.readFileSync(candidate, 'utf-8'))) return candidate;
+    } catch {}
+  }
+  return null;
+}
+
+/** Extracts the first page.goto() URL from a spec, so reused specs report their real target. */
+export function extractGotoUrl(content) {
+  const match = content.match(/page\.goto\(\s*(['"`])(.+?)\1/);
+  return match ? match[2] : null;
+}
 
 /**
  * Synthesizes Playwright TypeScript code based on session telemetry & markers.
@@ -81,52 +117,120 @@ function generateStepActionCode(step) {
   }
 }
 
-function escapeRegex(string) {
+export function escapeRegex(string) {
   return string.replace(/[/\-\\^$*+?.()|[\]{}]/g, '\\$&');
+}
+
+function parseJsonReport(stdout) {
+  if (!stdout) return null;
+  try {
+    return JSON.parse(stdout);
+  } catch {
+    // Fallback if stdout contains non-JSON preamble
+    const jsonStart = stdout.indexOf('{');
+    if (jsonStart === -1) return null;
+    try { return JSON.parse(stdout.slice(jsonStart)); } catch { return null; }
+  }
+}
+
+function stripAnsi(text) {
+  // eslint-disable-next-line no-control-regex
+  return String(text ?? '').replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '');
+}
+
+/** Flattens nested JSON reporter suites into test results. */
+function collectTests(suites = [], trail = []) {
+  const out = [];
+  for (const suite of suites) {
+    const nextTrail = suite.title ? [...trail, suite.title] : trail;
+    for (const spec of suite.specs || []) {
+      for (const t of spec.tests || []) {
+        const last = (t.results || [])[t.results.length - 1] || {};
+        out.push({ title: [...nextTrail, spec.title].join(' › '), status: last.status, duration: last.duration, errors: last.errors || [], steps: last.steps || [] });
+      }
+    }
+    out.push(...collectTests(suite.suites || [], nextTrail));
+  }
+  return out;
+}
+
+/** Builds a readable log from the JSON report, used by the HTML report cards. */
+function summarizeReport(report) {
+  const lines = [];
+  const stats = report.stats || {};
+  for (const t of collectTests(report.suites)) {
+    lines.push(`${t.status === 'passed' ? '✓' : '✗'} ${t.title} [${t.status}] (${t.duration ?? '?'}ms)`);
+    for (const s of t.steps) {
+      lines.push(`    ${s.error ? '✗' : '✓'} ${s.title}${s.duration != null ? ` (${s.duration}ms)` : ''}`);
+    }
+    for (const e of t.errors) lines.push('', stripAnsi(e.message || e.value || '').trim());
+  }
+  for (const e of report.errors || []) lines.push('', stripAnsi(e.message || '').trim());
+  lines.push('', `expected: ${stats.expected ?? 0}, unexpected: ${stats.unexpected ?? 0}, flaky: ${stats.flaky ?? 0}, skipped: ${stats.skipped ?? 0}`);
+  return lines.join('\n').trim();
 }
 
 /**
  * Runs a generated Playwright spec and parses execution results.
+ *
+ * `passed` reflects the JSON report, not just the exit code. If Playwright could not
+ * run the spec at all (spawn failure, no tests found, config error), the result is
+ * marked `infraError: true` so callers do not mistake it for a reproduced bug.
  */
 export async function executePlaywrightSpec(specPath, options = {}) {
   const specDir = path.dirname(specPath);
-  
+  const isWindows = process.platform === 'win32';
+  // Node >= 18.20.2 / 20.12.2 refuses to spawn .cmd/.bat files without a shell (CVE-2024-27980).
+  const command = isWindows ? 'npx.cmd' : 'npx';
+  // Spec filenames are sanitized to [A-Za-z0-9_.] in synthesizeTest, so shell interpolation is safe.
+  const args = ['playwright', 'test', path.basename(specPath), '--reporter=json'];
+  // Only filter by project when explicitly requested; without a config, "chromium" does not exist.
+  if (options.project) args.push(`--project=${options.project}`);
+
+  let stdout = '';
+  let stderr = '';
+  let exitError = null;
   try {
-    const { stdout, stderr } = await execFileAsync('npx.cmd', [
-      'playwright', 'test', path.basename(specPath),
-      '--reporter=json',
-      '--project=chromium'
-    ], {
+    ({ stdout, stderr } = await execFileAsync(command, args, {
       cwd: specDir,
-      timeout: 60000
-    });
-
-    let jsonReport = null;
-    try {
-      jsonReport = JSON.parse(stdout);
-    } catch {
-      // Fallback if stdout contains non-json headers
-      const jsonStart = stdout.indexOf('{');
-      if (jsonStart !== -1) {
-        jsonReport = JSON.parse(stdout.slice(jsonStart));
-      }
-    }
-
-    return {
-      passed: true,
-      rawOutput: stdout,
-      jsonReport,
-      error: null
-    };
+      timeout: options.timeout || 120000,
+      maxBuffer: 20 * 1024 * 1024,
+      shell: isWindows
+    }));
   } catch (err) {
-    // Playwright exits with code 1 when test fails (expected for bug reproduction)
+    // Playwright exits 1 when a test fails, so a non-zero exit is not an error by itself.
+    exitError = err;
+    stdout = err.stdout || '';
+    stderr = err.stderr || '';
+  }
+
+  const jsonReport = parseJsonReport(stdout);
+  const stats = jsonReport?.stats || {};
+  const ranTests = (stats.expected || 0) + (stats.unexpected || 0) + (stats.flaky || 0) > 0;
+
+  if (!jsonReport || !ranTests) {
+    const reason = jsonReport ? summarizeReport(jsonReport) : (exitError?.message || 'No JSON report produced');
     return {
       passed: false,
-      rawOutput: err.stdout || '',
-      errorOutput: err.stderr || err.message,
-      error: err.message
+      infraError: true,
+      output: stripAnsi([reason, stderr].filter(Boolean).join('\n\n')).trim(),
+      rawOutput: stdout,
+      errorOutput: stderr,
+      jsonReport,
+      error: exitError?.message || 'Playwright did not execute any tests'
     };
   }
+
+  const passed = (stats.unexpected || 0) === 0;
+  return {
+    passed,
+    infraError: false,
+    output: summarizeReport(jsonReport),
+    rawOutput: stdout,
+    errorOutput: stderr,
+    jsonReport,
+    error: passed ? null : 'One or more Playwright tests failed'
+  };
 }
 
 /**
@@ -142,7 +246,7 @@ export async function synthesizeTest({ sessionData, repoPath, outputDir, targetU
 
   const sessionId = sessionData.sessionId;
   const specFilename = `repro_${sessionId.replace(/[^a-zA-Z0-9_]/g, '_')}.spec.ts`;
-  const specPath = path.join(targetDir, specFilename);
+  let specPath = path.join(targetDir, specFilename);
 
   // Extract navigation target: explicit CLI URL > telemetry markers > title heuristics > live deployment
   let targetUrl = explicitUrl || null;
@@ -164,36 +268,48 @@ export async function synthesizeTest({ sessionData, repoPath, outputDir, targetU
   // Derive steps from markers or synthesize canonical inspection flow
   const steps = sessionData.telemetry?.markers || [];
 
-  if (verbose) {
-    console.log(`    [synth-test] Synthesizing spec for target: ${targetUrl}`);
-    console.log(`    [synth-test] Output file: ${specPath}`);
-  }
+  // Reuse a refined spec when one exists, unless real interaction markers give us something better to generate.
+  const refinedSpecPath = steps.length === 0 ? findRefinedSpec(specFilename, repoPath) : null;
 
-  const specContent = generatePlaywrightSpecCode({
-    sessionId,
-    targetUrl,
-    steps,
-    videoTitle: sessionData.telemetry?.videoTitle
-  });
+  if (refinedSpecPath) {
+    specPath = refinedSpecPath;
+    targetUrl = extractGotoUrl(fs.readFileSync(specPath, 'utf-8')) || targetUrl;
+    if (verbose) console.log(`    [synth-test] Reusing refined spec (not overwriting): ${specPath}`);
+  } else {
+    if (verbose) {
+      console.log(`    [synth-test] Synthesizing spec for target: ${targetUrl}`);
+      console.log(`    [synth-test] Output file: ${specPath}`);
+    }
 
-  fs.writeFileSync(specPath, specContent, 'utf-8');
+    const specContent = generatePlaywrightSpecCode({
+      sessionId,
+      targetUrl,
+      steps,
+      videoTitle: sessionData.telemetry?.videoTitle
+    });
 
-  // Verify file creation
-  if (!fs.existsSync(specPath) || fs.statSync(specPath).size === 0) {
-    throw new Error(`Failed to write Playwright spec to ${specPath}`);
+    fs.writeFileSync(specPath, specContent, 'utf-8');
+
+    // Verify file creation
+    if (!fs.existsSync(specPath) || fs.statSync(specPath).size === 0) {
+      throw new Error(`Failed to write Playwright spec to ${specPath}`);
+    }
   }
 
   // Execute synthesized spec to confirm failure (bug reproduction)
   if (verbose) console.log(`    [synth-test] Executing spec via Playwright to verify bug reproduction...`);
   const execResult = await executePlaywrightSpec(specPath, { verbose });
+  execResult.ranAgainst = targetUrl;
 
   return {
     sessionId,
     specPath,
     specFilename,
+    reusedExistingSpec: Boolean(refinedSpecPath),
     targetUrl,
     stepCount: steps.length,
-    failureConfirmed: !execResult.passed, // true = test failed = bug confirmed reproduced
+    // true only when Playwright actually ran and an assertion failed; infra errors are not a reproduction
+    failureConfirmed: !execResult.passed && !execResult.infraError,
     execResult,
     synthesizedAt: new Date().toISOString()
   };

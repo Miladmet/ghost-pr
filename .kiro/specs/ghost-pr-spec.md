@@ -11,6 +11,7 @@ Provide a hands-off, automated pipeline where developers or QA engineers can fee
 - [x] **REQ-4 (Codebase Diagnosis):** Search repository source files for selector tokens and failing lines.
 - [x] **REQ-5 (Self-Healing Loop):** Apply defensive AST patches and confirm green status with Playwright.
 - [x] **REQ-6 (PR Dispatch):** Create git branch `fix/ghost-pr-<id>`, commit diff + spec, and generate structured PR description.
+- [x] **REQ-7 (Visual HTML Report):** Generate a standalone, self-contained interactive HTML reproduction report in `artifacts/report.html` containing video keyframes, Red Playwright test logs, Green verification proof, and a colorized unified diff.
 
 ## 3. Supported Technologies
 - Playwright E2E Test Runner (`@playwright/test`)

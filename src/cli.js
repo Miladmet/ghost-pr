@@ -92,11 +92,19 @@ export async function runGhostPR(rawConfig) {
     sessionId: null,
     videoPath: null,
     telemetry: null,
+    keyframes: [],
+    targetUrl: null,
     specPath: null,
+    redResult: null,
+    bugReproduced: null,
     testPassedBefore: null,
+    targetFile: null,
+    targetLine: null,
     patchDiff: null,
+    greenResult: null,
     testPassedAfter: null,
     prUrl: null,
+    reportPath: null,
   };
 
   try {
@@ -112,6 +120,7 @@ export async function runGhostPR(rawConfig) {
     pipelineState.sessionId = ingestResult.sessionId;
     pipelineState.videoPath = ingestResult.videoPath;
     pipelineState.telemetry = ingestResult.telemetry;
+    pipelineState.keyframes = ingestResult.keyframes;
     console.log(`  ✓ Session verified: ${pipelineState.sessionId}`);
     console.log(`  ✓ Video stream ready: ${pipelineState.videoPath} (${(ingestResult.sizeBytes / 1024 / 1024).toFixed(2)} MB)`);
     console.log(`  ✓ Keyframes extracted: ${ingestResult.keyframes.length} frames`);
@@ -129,8 +138,12 @@ export async function runGhostPR(rawConfig) {
       verbose: config.verbose
     });
     pipelineState.specPath = testResult.specPath;
-    console.log(`  ✓ Spec generated: ${pipelineState.specPath}`);
-    console.log(`  ✓ Initial test execution confirms bug reproduction: ${testResult.failureConfirmed ? 'BUG REPRODUCED (Failing as expected)' : 'Warning: Test passed initially'}`);
+    pipelineState.targetUrl = testResult.targetUrl;
+    pipelineState.redResult = testResult.execResult || null;
+    pipelineState.bugReproduced = Boolean(testResult.failureConfirmed);
+    pipelineState.testPassedBefore = !testResult.failureConfirmed;
+    console.log(`  ✓ ${testResult.reusedExistingSpec ? 'Refined spec reused' : 'Spec generated'}: ${pipelineState.specPath}`);
+    console.log(`  ✓ Initial test execution confirms bug reproduction: ${testResult.failureConfirmed ? 'BUG REPRODUCED (Failing as expected)' : testResult.execResult?.infraError ? `Warning: Playwright could not run the spec (${testResult.execResult.error})` : 'Warning: Test passed initially (bug not reproduced)'}`);
 
     // -------------------------------------------------------------
     // STAGE 3: Autonomous Code Diagnosis & Patching
@@ -141,12 +154,21 @@ export async function runGhostPR(rawConfig) {
       repoPath: config.repo,
       testFailure: testResult,
       specPath: pipelineState.specPath,
+      outputDir: config.output,
       verbose: config.verbose
     });
     pipelineState.patchDiff = fixResult.patchDiff;
+    pipelineState.patchSource = fixResult.patchSource || null;
+    pipelineState.targetFile = fixResult.targetFile;
+    pipelineState.targetLine = fixResult.targetLine;
+    pipelineState.greenResult = fixResult.verification || null;
     pipelineState.testPassedAfter = fixResult.verifiedPassing;
-    console.log(`  ✓ Fault located in: ${fixResult.targetFile}:${fixResult.targetLine || 1}`);
-    console.log(`  ✓ Patch applied & verified with Playwright: ${fixResult.verifiedPassing ? '✅ PASSING (Green)' : '❌ Still failing'}`);
+    console.log(fixResult.targetFile
+      ? `  ✓ Fault located in: ${fixResult.targetFile}${fixResult.targetLine ? `:${fixResult.targetLine}` : ''}`
+      : `  ⚠ No fault location identified`);
+    console.log(`  ${fixResult.patchSource ? `✓ Patch captured from ${fixResult.patchSource}` : '⚠ No patch found in the target repo'}`);
+    const green = fixResult.verification;
+    console.log(`  ${fixResult.verifiedPassing ? '✓' : '✗'} Post-patch verification${green?.ranAgainst ? ` (${green.ranAgainst})` : ''}: ${fixResult.verifiedPassing ? '✅ PASSING (Green)' : green?.infraError ? `⚠ Could not run (${green.error})` : '❌ Still failing'}`);
 
     // -------------------------------------------------------------
     // STAGE 4: Git Branch & Pull Request Dispatch
@@ -156,6 +178,11 @@ export async function runGhostPR(rawConfig) {
       console.log(`  ℹ️ Dry-run mode enabled. Skipping remote Git push.`);
       console.log(`  ✓ Local patch saved to: ${path.join(config.output, 'fix.patch')}`);
       fs.writeFileSync(path.join(config.output, 'fix.patch'), fixResult.patchDiff || '# No changes');
+    } else if (!pipelineState.testPassedAfter) {
+      // Steering directive 4: only dispatch a PR once the fix has turned the suite green
+      console.log(`  ⚠ Skipping Pull Request: post-patch verification did not pass.`);
+      fs.writeFileSync(path.join(config.output, 'fix.patch'), fixResult.patchDiff || '# No changes');
+      console.log(`  ✓ Local patch saved to: ${path.join(config.output, 'fix.patch')}`);
     } else {
       const { createPullRequest } = await import('./git-pr.js');
       const prResult = await createPullRequest({
@@ -170,8 +197,35 @@ export async function runGhostPR(rawConfig) {
       console.log(`  🎉 Pull Request successfully opened: ${pipelineState.prUrl}`);
     }
 
+    // REQ-7: standalone visual HTML report (non-fatal: a report problem must not discard a finished fix)
+    try {
+      const { generateHtmlReport } = await import('./report-generator.js');
+      const { reportPath } = generateHtmlReport(pipelineState, {
+        outputDir: config.output,
+        dryRun: Boolean(config['dry-run'])
+      });
+      pipelineState.reportPath = reportPath;
+      const shown = path.relative(process.cwd(), reportPath).split(path.sep).join('/');
+      console.log(`  ✓ Visual HTML report generated: ${shown}`);
+    } catch (reportErr) {
+      console.warn(`  ⚠ HTML report generation failed: ${reportErr.message}`);
+    }
+
+    // Outcome-aware summary: report what actually happened, not a fixed success message
+    let banner;
+    if (pipelineState.redResult?.infraError) {
+      banner = '⚠ GhostPR: Inconclusive (Playwright could not run the reproduction spec)';
+      process.exitCode = 1;
+    } else if (!pipelineState.bugReproduced) {
+      banner = '✓ GhostPR: Baseline Maintained (No regression reproduced)';
+    } else if (pipelineState.testPassedAfter) {
+      banner = '✅ GhostPR: Autonomous Red ➔ Green Self-Healing Verified!';
+    } else {
+      banner = '❌ GhostPR: Regression reproduced, but the patch did not pass verification';
+      process.exitCode = 1;
+    }
     console.log(`\n======================================================`);
-    console.log(` ✅ GhostPR Pipeline Complete: 100% Autonomous Resolution `);
+    console.log(` ${banner}`);
     console.log(`======================================================\n`);
 
     return pipelineState;

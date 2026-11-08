@@ -1,65 +1,90 @@
 import { test, expect } from '@playwright/test';
 
 /**
- * Autonomous Reproduction Spec synthesized by GhostPR (AutoFix AI)
+ * Reproduction Spec for GhostPR (AutoFix AI)
  * Session ID: qc_bt6mrt8n
  * Title: QuickCast Tab Recording 10/28/2026
  * Target: https://miladmet.github.io/streamclip-ai-/
  *
- * Bug: Rolling 30s buffer never auto-starts on page load.
- *   - "Clip last 30 seconds" button is permanently disabled until user manually
- *     clicks "Start rolling buffer" — no auto-init occurs.
- *   - Recording (keyframes @ 5s, 10s, 20s) shows "Buffer Active (30/30s)" badge
- *     already active with the Clip button enabled, meaning prior behavior was
- *     to auto-initialize the buffer on load.
- *   - On the current live site, the buffer status is inactive and the Clip button
- *     is disabled, blocking the core clipping workflow.
+ * Recorded journey (keyframes @ 5s, 10s, 20s): the user captures a tab, the rolling
+ * buffer auto-starts ("Buffer Active (n/30s)"), and "Clip last 30 seconds" is enabled.
+ *
+ * This spec replays that journey with Chromium's fake media flags so the capture
+ * prompt is auto-accepted and a synthetic stream is supplied.
+ *
+ * Bug (reproduced on production): clicking "Simulate Chat Hype Spike" before any capture
+ * shows "Auto-clipping last 30s…" and overwrites the clip attribution, but no clip is made.
+ * Expected: a clear warning, attribution untouched, and auto-clip still working once capturing.
  */
+
+test.use({
+  launchOptions: {
+    args: [
+      '--use-fake-ui-for-media-stream',
+      '--use-fake-device-for-media-stream'
+    ]
+  }
+});
 
 test.describe('GhostPR Automated Bug Reproduction — qc_bt6mrt8n', () => {
 
-  test('Autonomous E2E reproduction and state verification', async ({ page }) => {
+  test('Hype spike handling before and after capture', async ({ page }) => {
     // Hoist error trap BEFORE navigation to capture boot & hydration exceptions
     const pageErrors = [];
     page.on('pageerror', err => pageErrors.push(err.message));
 
-    // Navigation to recorded target entrypoint
     await page.goto('https://miladmet.github.io/streamclip-ai-/', { waitUntil: 'networkidle' });
 
     await test.step('Verify initial target page load & layout', async () => {
       await expect(page).toHaveURL(/miladmet\.github\.io\/streamclip\-ai\-\//);
-      await expect(page.locator('body')).toBeVisible();
       await expect(page).toHaveTitle(/StreamClip AI/);
     });
 
-    await test.step('Verify Clip controls panel renders with correct input defaults', async () => {
-      // Confirmed via probe: #channel and #clipper have values from recording session
-      await expect(page.locator('#channel')).toBeVisible();
-      await expect(page.locator('#channel')).toHaveValue('riotgames');
-      await expect(page.locator('#clipper')).toHaveValue('@viewer');
+    await test.step('Verify idle state before capture', async () => {
+      await expect(page.locator('#start')).toHaveText(/Start rolling buffer/);
+      await expect(page.locator('#start')).toBeDisabled();
+      await expect(page.locator('#clip')).toBeDisabled();
     });
 
-    await test.step('Verify rolling buffer auto-initializes on page load (Buffer Active badge)', async () => {
-      // Recording keyframes at 5s, 10s, 20s all show "Buffer Active (30/30s)" —
-      // the buffer should be running without requiring manual user interaction.
-      // BUG: on the live site this button reads "Start rolling buffer" instead,
-      // confirming the auto-init regressed.
-      await expect(
-        page.locator('button', { hasText: /Buffer Active/i })
-      ).toBeVisible({ timeout: 5000 });
+    await test.step('Hype spike before capture must not claim an auto-clip', async () => {
+      // Bug: without a capture, recordChatHype() announces "Auto-clipping last 30s…" and
+      // overwrites the clip attribution, but exportAt() silently does nothing (no buffer).
+      await page.locator('#simHypeBtn').click();
+      await expect(page.locator('#hypeScoreText')).toHaveText('(100% Hype)');
+      await expect(page.locator('#chatStatus')).toHaveText(
+        '⚠️ Hype spike detected — capture a screen tab first to enable auto-clip'
+      );
+      await expect(page.locator('#chatStatus')).not.toContainText('Auto-clipping');
+      await expect(page.locator('#clipper'), 'Clip attribution must not be overwritten').toHaveValue('@viewer');
+      await expect(page.locator('#vaultSection')).toBeHidden();
     });
 
-    await test.step('Verify "Clip last 30 seconds" button is enabled when buffer is active', async () => {
-      // Core workflow gate: this button must be enabled when buffer is running.
-      // BUG: isEnabled() returns false on current live site — button is disabled.
-      const clipBtn = page.locator('button', { hasText: /Clip last 30 seconds/i });
-      await expect(clipBtn).toBeVisible();
-      await expect(clipBtn).toBeEnabled();
+    await test.step('Click "Capture screen / Twitch tab"', async () => {
+      await page.locator('#capture').click();
     });
 
-    await test.step('Inspect critical UI components and detect unhandled errors', async () => {
+    await test.step('Verify rolling buffer auto-starts (Buffer Active badge)', async () => {
+      await expect(page.locator('#start')).toHaveText(/Buffer Active \(\d+\/30s\)/, { timeout: 10000 });
+      await expect(page.locator('#status')).toContainText(/Rolling buffer (started|active)/);
+    });
+
+    await test.step('Verify "Clip last 30 seconds" and "Stop capture" are enabled', async () => {
+      await expect(page.locator('#clip')).toBeEnabled();
+      await expect(page.locator('#stop')).toBeEnabled();
+    });
+
+    await test.step('Hype spike after capture still auto-clips (regression guard)', async () => {
+      // Give the MediaRecorder time to emit chunks so a clip can be cut
+      await page.waitForTimeout(2500);
+      await page.locator('#simHypeBtn').click();
+      await expect(page.locator('#chatStatus')).toContainText('Auto-clipping last 30s');
+      await expect(page.locator('#vaultSection')).toBeVisible({ timeout: 15000 });
+      await expect(page.locator('#download')).toBeVisible();
+    });
+
+    await test.step('Detect unhandled runtime errors', async () => {
       await page.waitForTimeout(1000);
-      expect(pageErrors.length, 'No uncaught runtime exceptions should be thrown').toBe(0);
+      expect(pageErrors, 'No uncaught runtime exceptions should be thrown').toEqual([]);
     });
   });
 
