@@ -45,7 +45,7 @@ export function buildVerificationSection({ verification = {}, patchDiff, specRep
 /**
  * Builds a structured, high-impact Pull Request markdown body.
  */
-export function buildPullRequestBody({ sessionId, telemetry, patchDiff, specPath, specRepoPath, verification = {} }) {
+export function buildPullRequestBody({ sessionId, telemetry, patchDiff, specPath, specRepoPath, reusedExistingSpec = false, verification = {} }) {
   // Path of the spec inside the target repo (posix separators), used in the test command
   specRepoPath = specRepoPath || `tests/${path.basename(specPath || 'repro.spec.ts')}`;
   const { status, checklist } = buildVerificationSection({ verification, patchDiff, specRepoPath });
@@ -53,9 +53,16 @@ export function buildPullRequestBody({ sessionId, telemetry, patchDiff, specPath
   const videoTitle = telemetry?.videoTitle || 'QuickCast Session';
   const markers = telemetry?.markers || [];
 
-  const markersTable = markers.length > 0
-    ? markers.map((m, i) => `| ${i + 1} | \`${m.timeSec || '00:00'}\` | ${m.action || 'Action'} | \`${m.selector || m.target || 'DOM Element'}\` |`).join('\n')
-    : `| 1 | \`00:05\` | Visual Defect Detected | Page UI Component |`;
+  // Only render the journey table when real markers exist; never invent a placeholder row
+  const journeySection = markers.length > 0
+    ? `The user recorded a bug via QuickCast. GhostPR analyzed the interaction markers:
+
+| Step | Timestamp | Observed Action | Target Selector |
+| :---: | :---: | :--- | :--- |
+${markers.map((m, i) => `| ${i + 1} | \`${m.timeSec || '00:00'}\` | ${m.action || 'Action'} | \`${m.selector || m.target || 'DOM Element'}\` |`).join('\n')}`
+    : reusedExistingSpec
+      ? '*No interaction markers were captured in this session; the existing refined reproduction spec was used.*'
+      : '*No interaction markers were captured in this session; baseline visual inspection sequence applied.*';
 
   return `## 👻 GhostPR (AutoFix AI) — Autonomous Bug Resolution
 > **Automated Pull Request generated from user recording session:** [\`${sessionId}\`](${watchUrl})  
@@ -65,11 +72,7 @@ export function buildPullRequestBody({ sessionId, telemetry, patchDiff, specPath
 ---
 
 ### 1. ⏱️ Visual Telemetry & Recorded User Journey
-The user recorded a bug via QuickCast. GhostPR analyzed the interaction markers:
-
-| Step | Timestamp | Observed Action | Target Selector |
-| :---: | :---: | :--- | :--- |
-${markersTable}
+${journeySection}
 
 🎥 **[Watch Original Session Recording](${watchUrl})**
 
@@ -148,7 +151,7 @@ async function gitCmd(repoPath, args) {
  * Core Module 4 Orchestrator:
  * Creates branch -> commits spec + fix -> dispatches PR via GitHub Octokit (or prints ready PR).
  */
-export async function createPullRequest({ repoPath, sessionId, patchDiff, specPath, telemetry, verification = {}, outputDir, verbose = false }) {
+export async function createPullRequest({ repoPath, sessionId, patchDiff, specPath, telemetry, verification = {}, reusedExistingSpec = false, outputDir, verbose = false }) {
   const root = path.resolve(repoPath || '.');
   const safeId = sessionId.replace(/[^a-zA-Z0-9_]/g, '_');
   const branchName = `fix/ghost-pr-${safeId}`;
@@ -162,6 +165,7 @@ export async function createPullRequest({ repoPath, sessionId, patchDiff, specPa
     patchDiff,
     specPath,
     specRepoPath: specTarget?.repoRelPath,
+    reusedExistingSpec,
     verification: { ...verification, specIncluded: Boolean(specTarget) }
   });
 

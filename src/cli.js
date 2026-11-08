@@ -138,6 +138,7 @@ export async function runGhostPR(rawConfig) {
       verbose: config.verbose
     });
     pipelineState.specPath = testResult.specPath;
+    pipelineState.reusedExistingSpec = Boolean(testResult.reusedExistingSpec);
     pipelineState.targetUrl = testResult.targetUrl;
     pipelineState.redResult = testResult.execResult || null;
     pipelineState.bugReproduced = Boolean(testResult.failureConfirmed);
@@ -197,6 +198,7 @@ export async function runGhostPR(rawConfig) {
           patchSource: pipelineState.patchSource,
           redRanAgainst: pipelineState.redResult?.ranAgainst
         },
+        reusedExistingSpec: pipelineState.reusedExistingSpec,
         outputDir: config.output,
         verbose: config.verbose
       });
